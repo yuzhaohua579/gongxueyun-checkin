@@ -15,9 +15,26 @@ import cv2
 logger = logging.getLogger(__name__)
 
 
+def find_model_file(filename: str) -> str:
+    """查找模型文件，支持多个路径自动探测。"""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    possible_paths = [
+        os.path.join(base_dir, "..", "models", filename),
+        os.path.join(base_dir, "..", filename),
+        os.path.join(os.getcwd(), "models", filename),
+        os.path.join(os.getcwd(), filename),
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            logger.info(f"找到模型文件: {path}")
+            return path
+    default_path = os.path.join(base_dir, "..", "models", filename)
+    logger.warning(f"未找到模型文件 {filename}，使用默认路径: {default_path}")
+    return default_path
+
+
 def calculate_precise_slider_distance(target_start_x: int, target_end_x: int,
                                       slider_width: int) -> float:
-    """计算滑块需要移动的精确距离，并添加微小随机偏移。"""
     try:
         target_center_x = (target_start_x + target_end_x) / 2
         slider_initial_center_x = slider_width / 2
@@ -32,10 +49,9 @@ def calculate_precise_slider_distance(target_start_x: int, target_end_x: int,
 
 
 def extract_png_width(png_binary: bytes) -> int:
-    """从PNG二进制数据中提取图像宽度。"""
     try:
         if png_binary[:8] != b"\x89PNG\r\n\x1a\n":
-            raise ValueError("无效的PNG签名")
+            raise ValueError("无效的PNG签名：不是有效的PNG图像")
         width = struct.unpack(">I", png_binary[16:20])[0]
         logger.info(f"提取PNG宽度成功: {width}")
         return width
@@ -48,7 +64,6 @@ def extract_png_width(png_binary: bytes) -> int:
 
 
 def slide_match(target_bytes: bytes, background_bytes: bytes) -> list:
-    """获取验证区域坐标，使用目标检测算法。"""
     try:
         target = cv2.imdecode(np.frombuffer(target_bytes, np.uint8),
                               cv2.IMREAD_ANYCOLOR)
@@ -70,7 +85,6 @@ def slide_match(target_bytes: bytes, background_bytes: bytes) -> list:
 
 
 def recognize_blockPuzzle_captcha(target: str, background: str) -> str:
-    """识别滑块验证码。"""
     try:
         target_bytes = base64.b64decode(target)
         background_bytes = base64.b64decode(background)
@@ -95,7 +109,6 @@ _tesseract_configured = False
 
 
 def _configure_tesseract():
-    """配置Tesseract路径"""
     global _tesseract_configured
     if _tesseract_configured:
         return
@@ -111,7 +124,6 @@ def _configure_tesseract():
 
 
 def is_tesseract_available() -> bool:
-    """检查Tesseract OCR是否可用"""
     global _tesseract_available
     if _tesseract_available is not None:
         return _tesseract_available
@@ -126,12 +138,11 @@ def is_tesseract_available() -> bool:
 
 
 def predict_ocr_tesseract(image: np.ndarray) -> str:
-    """使用Tesseract进行OCR识别（备选方案）。"""
     _configure_tesseract()
     import pytesseract
-    from PIL import Image
+    from PIL import Image as PILImage
     rgb_img = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    pil_img = Image.fromarray(rgb_img)
+    pil_img = PILImage.fromarray(rgb_img)
     text = pytesseract.image_to_string(
         pil_img, lang='chi_sim',
         config='--psm 10 --oem 3'
@@ -143,7 +154,6 @@ def predict_ocr_tesseract(image: np.ndarray) -> str:
 def detect_objects(model_path: str,
                    image_data: MatLike,
                    use_gpu: bool = False) -> list[list[int]]:
-    """使用ONNX模型进行目标检测。"""
     try:
         scale = min(640 / image_data.shape[1], 640 / image_data.shape[0])
         img_resized = cv2.resize(
@@ -156,15 +166,12 @@ def detect_objects(model_path: str,
                                                      img_resized.shape[1]) // 2
         new_image[dh:dh + img_resized.shape[0],
                   dw:dw + img_resized.shape[1]] = (img_resized)
-
         input_img = (np.expand_dims(new_image.transpose(
             (2, 0, 1)), axis=0).astype(np.float32) / 255.0)
-
         providers = ["CUDAExecutionProvider"
                      ] if use_gpu else ["CPUExecutionProvider"]
         session = ort.InferenceSession(model_path, providers=providers)
         result = session.run(None, {session.get_inputs()[0].name: input_img})
-
         detections = result[0][0]
         boxes = [[
             x_center - width / 2,
@@ -178,11 +185,9 @@ def detect_objects(model_path: str,
             for _, _, _, _, confidence, *class_scores in detections
             if confidence >= 0.5
         ]
-
         if boxes:
             indices = cv2.dnn.NMSBoxes(boxes, scores, 0.5, 0.5)
             boxes = [boxes[i] for i in indices]
-
         img_h, img_w = image_data.shape[:2]
         valid_boxes = []
         for x1, y1, x2, y2 in boxes:
@@ -193,7 +198,6 @@ def detect_objects(model_path: str,
             if nx2 > nx1 and ny2 > ny1:
                 valid_boxes.append([nx1, ny1, nx2, ny2])
         return valid_boxes
-
     except Exception as e:
         raise ValueError(f"目标检测失败: {e}")
 
@@ -201,24 +205,20 @@ def detect_objects(model_path: str,
 def predict_ocr(model_path: str,
                 image: np.ndarray,
                 use_gpu: bool = False) -> str:
-    """使用ONNX模型进行OCR预测。"""
     try:
         session = ort.InferenceSession(
             model_path,
             providers=(["CUDAExecutionProvider"]
                        if use_gpu else ["CPUExecutionProvider"]),
         )
-
         if image is None or image.size == 0 or image.shape[0] == 0 or image.shape[1] == 0:
             raise ValueError("输入图片为空或尺寸无效")
-
         image = np.expand_dims(
             cv2.cvtColor(cv2.resize(image,
                                     (64, 64)), cv2.COLOR_BGR2RGB).transpose(
                                         (2, 0, 1)).astype(np.float32) / 255.0,
             axis=0,
         )
-
         charset = [
             "士","候","之","科","孩","雪","万","章","导","治",
             "亲","社","所","似","验","习","吃","历","写","业",
@@ -270,57 +270,48 @@ def predict_ocr(model_path: str,
             "穿","友","下","拉","任","太","常","场","敢","清",
             "路","破","传","空","师","切","条",
         ]
-
         return "".join(charset[item] for item in session.run(
             None, {session.get_inputs()[0].name: image})[1])
-
     except Exception as e:
         raise Exception(f"OCR预测失败: {e}")
 
 
-def save_click_word_snapshot(image, bboxes, click_points,
-                             wordlist, recognized_dict,
+def save_click_word_snapshot(image: np.ndarray, bboxes: list, click_points: list,
+                             wordlist: list, recognized_dict: dict,
                              stage: str = "predict") -> str:
-    """保存文字点选验证码的快照。"""
     snapshot_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "snapshots")
     os.makedirs(snapshot_dir, exist_ok=True)
-
     img_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(img_pil)
-
     font_path = None
     for fp in [
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simhei.ttf",
         "C:/Windows/Fonts/simsun.ttc",
         "/System/Library/Fonts/PingFang.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]:
         if os.path.exists(fp):
             font_path = fp
             break
-
     try:
         font_label = ImageFont.truetype(font_path, 16) if font_path else ImageFont.load_default()
         font_click = ImageFont.truetype(font_path, 14) if font_path else ImageFont.load_default()
     except Exception:
         font_label = ImageFont.load_default()
         font_click = ImageFont.load_default()
-
     for word, bbox in recognized_dict.items():
         x1, y1, x2, y2 = bbox
         draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=2)
         draw.text((x1, y1 - 18), word, fill=(0, 255, 0), font=font_label)
-
     for i, pt in enumerate(click_points):
         x, y = pt["x"], pt["y"]
         r = 6
         draw.ellipse([x - r, y - r, x + r, y + r], fill=(255, 0, 0))
         label = f"{i + 1}.{wordlist[i] if i < len(wordlist) else '?'}"
         draw.text((x + 10, y - 14), label, fill=(255, 0, 0), font=font_click)
-
     annotated = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
-
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     filename = os.path.join(snapshot_dir,
                             f"click_word_{stage}_{timestamp}.png")
@@ -330,21 +321,16 @@ def save_click_word_snapshot(image, bboxes, click_points,
 
 
 def recognize_clickWord_captcha(target: str, wordlist: list) -> str:
-    """从给定的图像中识别点击文字验证码。"""
     target_bytes = base64.b64decode(target)
     image = cv2.imdecode(np.frombuffer(target_bytes, dtype=np.uint8),
                          cv2.IMREAD_COLOR)
-
-    bboxes = detect_objects("./models/yolov5n.onnx", image)
-
-    ocr_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models", "ocr.onnx")
+    bboxes = detect_objects(find_model_file("yolov5n.onnx"), image)
+    ocr_model_path = find_model_file("ocr.onnx")
     use_onnx_ocr = os.path.exists(ocr_model_path) and os.path.getsize(ocr_model_path) > 13000000
-
     if not use_onnx_ocr:
         logger.info("ocr.onnx 模型不可用，尝试使用Tesseract OCR")
         if not is_tesseract_available():
             raise Exception("OCR不可用：既没有ocr.onnx模型，Tesseract也不可用")
-
     recognized_dict = {}
     for bbox in bboxes:
         try:
@@ -359,10 +345,8 @@ def recognize_clickWord_captcha(target: str, wordlist: list) -> str:
                 logger.info(f"OCR识别: [{text}] @ ({x_min},{y_min})-({x_max},{y_max})")
         except Exception as e:
             logger.warning(f"处理文本框时出错: {e}")
-
     logger.info(f"需要点击: {wordlist}")
     logger.info(f"识别结果: {list(recognized_dict.keys())}")
-
     random_coordinates = []
     for word in wordlist:
         bbox = recognized_dict.get(word)
@@ -372,8 +356,6 @@ def recognize_clickWord_captcha(target: str, wordlist: list) -> str:
             random_coordinates.append({"x": x, "y": y})
         else:
             logger.warning(f"未找到字符: {word}")
-
     save_click_word_snapshot(image, bboxes, random_coordinates, wordlist,
                              recognized_dict, stage="predict")
-
     return json.dumps(random_coordinates, separators=(",", ":"))
