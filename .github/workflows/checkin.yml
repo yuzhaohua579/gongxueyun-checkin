@@ -1,0 +1,92 @@
+name: 工学云自动打卡
+
+on:
+  schedule:
+    # 上班打卡：北京时间 08:00 (UTC 00:00)
+    - cron: '0 0 * * 1-6'
+    # 下班打卡：北京时间 17:30 (UTC 09:30)
+    - cron: '30 9 * * 1-6'
+  # 支持手动触发
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: '触发原因'
+        required: false
+        default: '手动触发测试'
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install system dependencies (Tesseract OCR)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-chi-sim libgl1-mesa-glx
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests Pillow numpy opencv-python-headless onnxruntime cryptography pytesseract
+
+      - name: Generate config.json from secrets
+        run: |
+          cat > user/config.json << 'EOF'
+          {
+            "config": {
+              "user": {
+                "phone": "${{ secrets.PHONE }}",
+                "password": "${{ secrets.PASSWORD }}"
+              },
+              "clockIn": {
+                "mode": "twice_daily",
+                "location": {
+                  "address": "${{ secrets.ADDRESS }}",
+                  "latitude": "${{ secrets.LATITUDE }}",
+                  "longitude": "${{ secrets.LONGITUDE }}",
+                  "province": "${{ secrets.PROVINCE }}",
+                  "city": "${{ secrets.CITY }}",
+                  "area": "${{ secrets.AREA }}"
+                },
+                "holidaysClockIn": false,
+                "customDays": [1, 2, 3, 4, 5, 6],
+                "time": {
+                  "start": "08:00",
+                  "float": 10
+                }
+              },
+              "smtp": {
+                "enable": ${{ secrets.SMTP_ENABLE == 'true' }},
+                "host": "${{ secrets.SMTP_HOST }}",
+                "port": ${{ secrets.SMTP_PORT || 465 }},
+                "username": "${{ secrets.SMTP_USERNAME }}",
+                "password": "${{ secrets.SMTP_PASSWORD }}",
+                "from": "工学云打卡助手",
+                "to": ["${{ secrets.SMTP_TO }}"]
+              },
+              "device": "{brand: Redmi K70Pro, systemVersion: 14, Platform: Android, isPhysicalDevice: true, incremental: V14.0.6.0.TLFCNXM}"
+            }
+          }
+          EOF
+          echo "config.json generated successfully"
+          cat user/config.json | head -5
+
+      - name: Run check-in
+        run: |
+          python run_github.py
+
+      - name: Send email notification (optional)
+        if: always()
+        run: |
+          echo "打卡任务执行完成"
